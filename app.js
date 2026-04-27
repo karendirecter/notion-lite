@@ -38,7 +38,9 @@ const BLOCK_TYPES = [
   { type: "table", name: "表格", desc: "可输入数据表格", icon: "▦", ph: "" },
   { type: "divider", name: "分割线", desc: "水平分隔", icon: "—", ph: "" }
 ];
+BLOCK_TYPES.splice(BLOCK_TYPES.length - 1, 0, { type: "ai", name: "AI Writer", desc: "Generate structured note blocks", icon: "AI", ph: "" });
 const BT_MAP = Object.fromEntries(BLOCK_TYPES.map(item => [item.type, item]));
+const AI_WRITABLE_TYPES = new Set(["paragraph", "h1", "h2", "h3", "bullet", "numbered", "todo", "quote", "callout", "code", "table", "divider"]);
 
 let state = loadState();
 let saveTimer = null;
@@ -56,6 +58,13 @@ function createBlock(type = "paragraph", data = {}) {
   if (type === "callout") block.emoji = data.emoji || DEFAULT_CALLOUT_ICON;
   if (type === "table") {
     block.rows = normalizeTableRows(data.rows);
+    delete block.text;
+  }
+  if (type === "ai") {
+    block.messages = normalizeAIMessages(data.messages);
+    block.draft = typeof data.draft === "string" ? data.draft : "";
+    block.error = typeof data.error === "string" ? data.error : "";
+    block.isLoading = !!data.isLoading;
     delete block.text;
   }
   return block;
@@ -154,10 +163,27 @@ function normalizeBlock(block) {
     next.rows = normalizeTableRows(block.rows);
     return next;
   }
+  if (next.type === "ai") {
+    next.messages = normalizeAIMessages(block.messages);
+    next.draft = typeof block.draft === "string" ? block.draft : "";
+    next.error = typeof block.error === "string" ? block.error : "";
+    next.isLoading = !!block.isLoading;
+    return next;
+  }
   next.text = typeof block.text === "string" ? block.text : "";
   if (next.type === "todo") next.checked = !!block.checked;
   if (next.type === "callout") next.emoji = block.emoji || DEFAULT_CALLOUT_ICON;
   return next;
+}
+
+function normalizeAIMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .map(message => ({
+      role: message?.role === "assistant" ? "assistant" : "user",
+      content: typeof message?.content === "string" ? message.content : ""
+    }))
+    .filter(message => message.content.trim());
 }
 
 function normalizePage(page) {
@@ -473,7 +499,7 @@ function buildBlockEl(block) {
   el.dataset.type = block.type;
   if (block.type === "todo") el.dataset.checked = block.checked ? "true" : "false";
   el.addEventListener("mousedown", (event) => {
-    if (!event.target.closest(".block-handles") && !["table", "image"].includes(block.type)) {
+    if (!event.target.closest(".block-handles") && !["table", "image", "ai"].includes(block.type)) {
       setSelectedBlock(null);
     }
   });
@@ -534,6 +560,8 @@ function buildBlockEl(block) {
     el.appendChild(buildImageBlock(block));
   } else if (block.type === "table") {
     el.appendChild(buildTableBlock(block));
+  } else if (block.type === "ai") {
+    el.appendChild(buildAIBlock(block));
   } else {
     const content = document.createElement("div");
     content.className = "b-content";
@@ -730,6 +758,83 @@ function buildTableBlock(block) {
   wrap.appendChild(buildTableEdgeControls(block, scroll));
   updateTableSelectionHighlight(block.id, wrap);
 
+  return wrap;
+}
+
+function buildAIBlock(block) {
+  const wrap = document.createElement("div");
+  wrap.className = "ai-wrap";
+  wrap.tabIndex = 0;
+  wrap.addEventListener("focus", () => setSelectedBlock(block.id));
+  wrap.addEventListener("mousedown", event => {
+    if (!event.target.closest(".block-handles")) setSelectedBlock(block.id);
+  });
+
+  const status = block.isLoading ? "AI writing..." : "AI Writer";
+  const helper = document.createElement("div");
+  helper.className = "ai-block-head";
+  helper.innerHTML =         `
+    <div class="ai-chip">${status}</div>
+    <div class="ai-meta">Generated note blocks will be inserted directly below this card.</div>`;
+  wrap.appendChild(helper);
+
+  const messages = document.createElement("div");
+  messages.className = "ai-messages";
+  if (block.messages.length) {
+    messages.innerHTML = block.messages.map(message =>       `
+      <div class="ai-message ${message.role}">
+        <div class="ai-message-role">${message.role === "assistant" ? "AI" : "You"}</div>
+        <div class="ai-message-body">${plainTextToHTML(message.content)}</div>
+      </div>`).join("");
+  } else {
+    messages.innerHTML =       `
+      <div class="ai-empty">
+        Describe what you want to write. The AI will create native note blocks such as paragraphs, quotes, tables, todos, and callouts.
+      </div>`;
+  }
+  wrap.appendChild(messages);
+
+  if (block.error) {
+    const error = document.createElement("div");
+    error.className = "ai-error";
+    error.textContent = block.error;
+    wrap.appendChild(error);
+  }
+
+  const composer = document.createElement("div");
+  composer.className = "ai-composer";
+
+  const input = document.createElement("textarea");
+  input.className = "ai-input";
+  input.rows = 1;
+  input.placeholder = "Example: Write meeting notes about backend monitoring, with a summary, action items, and a comparison table.";
+  input.value = block.draft || "";
+  input.disabled = block.isLoading;
+  autoResizeTextarea(input);
+  input.addEventListener("input", () => {
+    block.draft = input.value;
+    block.error = "";
+    autoResizeTextarea(input);
+    touchPage();
+    scheduleSave();
+  });
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      requestAIWrite(block.id);
+    }
+  });
+  composer.appendChild(input);
+
+  const send = document.createElement("button");
+  send.className = "ai-send";
+  send.type = "button";
+  send.textContent = block.isLoading ? "Working..." : "Send";
+  send.disabled = block.isLoading;
+  send.addEventListener("click", () => requestAIWrite(block.id));
+  composer.appendChild(send);
+
+  wrap.appendChild(composer);
   return wrap;
 }
 
@@ -1058,6 +1163,12 @@ function focusBlock(id, where = "start") {
       placeCaret(tableCell, "start");
       return;
     }
+    const aiInput = document.querySelector(`.block[data-id="${id}"] .ai-input`);
+    if (aiInput) {
+      aiInput.focus();
+      aiInput.setSelectionRange?.(aiInput.value.length, aiInput.value.length);
+      return;
+    }
     const shell = document.querySelector(`.block[data-id="${id}"] .table-wrap, .block[data-id="${id}"] .image-wrap`);
     shell?.focus?.();
   });
@@ -1092,6 +1203,20 @@ function insertBlockAfter(afterId, block, focus = false) {
   if (focus) focusBlock(normalized.id, "start");
 }
 
+function insertBlocksAfter(afterId, blocks, focus = false) {
+  const page = currentPage();
+  const index = page.blocks.findIndex(item => item.id === afterId);
+  if (index < 0 || !Array.isArray(blocks) || !blocks.length) return [];
+  const normalized = blocks.map(normalizeBlock);
+  page.blocks.splice(index + 1, 0, ...normalized);
+  touchPage();
+  scheduleSave();
+  renderBlocks();
+  renderOutline();
+  if (focus && normalized[0]) focusBlock(normalized[0].id, "start");
+  return normalized.map(block => block.id);
+}
+
 function createParagraphAfter(blockId) {
   const block = createBlock("paragraph");
   insertBlockAfter(blockId, block, true);
@@ -1121,9 +1246,24 @@ function applyBlockType(block, type, shouldFocusEnd) {
   if (type === "table") {
     block.rows = normalizeTableRows(block.rows);
     delete block.text;
+    delete block.messages;
+    delete block.draft;
+    delete block.error;
+    delete block.isLoading;
+  } else if (type === "ai") {
+    block.messages = normalizeAIMessages(block.messages);
+    block.draft = typeof block.draft === "string" ? block.draft : "";
+    block.error = "";
+    block.isLoading = false;
+    delete block.text;
+    delete block.rows;
   } else {
     block.text = type === "divider" ? "" : (block.text || "");
     delete block.rows;
+    delete block.messages;
+    delete block.draft;
+    delete block.error;
+    delete block.isLoading;
   }
   touchPage();
   scheduleSave();
@@ -1322,6 +1462,139 @@ async function insertImagesFromFiles(files, afterId = getActiveBlockId()) {
   renderOutline();
 }
 
+function autoResizeTextarea(textarea) {
+  textarea.style.height = "auto";
+  textarea.style.height = `${Math.min(220, Math.max(52, textarea.scrollHeight))}px`;
+}
+
+function plainTextToHTML(value) {
+  return escapeHTML(String(value || "")).replace(/\n/g, "<br>");
+}
+
+function serializeBlockForAI(block) {
+  if (!block || block.type === "ai") return null;
+  if (block.type === "table") {
+    return {
+      type: "table",
+      rows: block.rows.map(row => row.map(cell => stripHTML(cell)))
+    };
+  }
+  if (block.type === "image") {
+    return {
+      type: "image",
+      caption: block.caption || ""
+    };
+  }
+  return {
+    type: block.type,
+    text: stripHTML(block.text || "")
+  };
+}
+
+function collectAIContextBlocks(anchorId) {
+  const page = currentPage();
+  const anchorIndex = page.blocks.findIndex(item => item.id === anchorId);
+  if (anchorIndex < 0) return [];
+  return page.blocks
+    .slice(Math.max(0, anchorIndex - 10), anchorIndex)
+    .map(serializeBlockForAI)
+    .filter(Boolean);
+}
+
+function normalizeAIResponseBlock(spec) {
+  if (!spec || typeof spec !== "object") return null;
+  const type = typeof spec.type === "string" ? spec.type.trim() : "";
+  if (!AI_WRITABLE_TYPES.has(type)) return null;
+
+  if (type === "divider") return createBlock("divider");
+
+  if (type === "table") {
+    const rows = Array.isArray(spec.rows)
+      ? spec.rows.map(row => Array.isArray(row) ? row.map(cell => plainTextToHTML(String(cell ?? ""))) : [])
+      : [];
+    return createBlock("table", { rows });
+  }
+
+  const text = typeof spec.text === "string" ? spec.text.trim() : "";
+  if (!text) return null;
+
+  const data = { text: plainTextToHTML(text) };
+  if (type === "todo") data.checked = !!spec.checked;
+  if (type === "callout") data.emoji = typeof spec.emoji === "string" && spec.emoji.trim() ? spec.emoji.trim() : DEFAULT_CALLOUT_ICON;
+  return createBlock(type, data);
+}
+
+function normalizeAIResponseBlocks(blocks, fallbackText = "") {
+  const normalized = Array.isArray(blocks) ? blocks.map(normalizeAIResponseBlock).filter(Boolean) : [];
+  if (normalized.length) return normalized;
+  const fallback = typeof fallbackText === "string" ? fallbackText.trim() : "";
+  return fallback ? [createBlock("paragraph", { text: plainTextToHTML(fallback) })] : [];
+}
+
+async function requestAIWrite(blockId) {
+  const block = currentPage().blocks.find(item => item.id === blockId);
+  if (!block || block.type !== "ai" || block.isLoading) return;
+
+  const prompt = (block.draft || "").trim();
+  if (!prompt) {
+    toast("Please enter a request first.");
+    return;
+  }
+
+  block.messages = [...block.messages, { role: "user", content: prompt }];
+  block.draft = "";
+  block.error = "";
+  block.isLoading = true;
+  touchPage();
+  scheduleSave();
+  renderBlockInPlace(blockId);
+
+  try {
+    const response = await fetch("/api/ai/compose", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        pageTitle: currentPage().title || "",
+        contextBlocks: collectAIContextBlocks(blockId),
+        messages: block.messages
+      })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || `AI request failed (${response.status})`);
+    }
+
+    const latestBlock = currentPage().blocks.find(item => item.id === blockId);
+    if (!latestBlock || latestBlock.type !== "ai") return;
+
+    const reply = typeof payload.reply === "string" && payload.reply.trim() ? payload.reply.trim() : "I generated note content based on your request.";
+    latestBlock.messages = [...latestBlock.messages, { role: "assistant", content: reply }];
+    latestBlock.isLoading = false;
+    latestBlock.error = "";
+
+    const nextBlocks = normalizeAIResponseBlocks(payload.blocks, reply);
+    if (nextBlocks.length) {
+      insertBlocksAfter(latestBlock.id, nextBlocks, true);
+    } else {
+      touchPage();
+      scheduleSave();
+      renderBlockInPlace(blockId);
+    }
+  } catch (error) {
+    const latestBlock = currentPage().blocks.find(item => item.id === blockId);
+    if (!latestBlock || latestBlock.type !== "ai") return;
+    latestBlock.isLoading = false;
+    latestBlock.error = error instanceof Error ? error.message : "AI generation failed.";
+    touchPage();
+    scheduleSave();
+    renderBlockInPlace(blockId);
+    toast(latestBlock.error);
+  }
+}
+
 function caretOffset(el) {
   const sel = window.getSelection();
   if (!sel.rangeCount) return 0;
@@ -1504,6 +1777,7 @@ function applySlash(type) {
   applyBlockType(block, type, true);
   closeSlashMenu();
   if (type === "table") focusTableCell(block.id, 1, 0, "start");
+  if (type === "ai") focusBlock(block.id, "end");
 }
 
 function showBlockMenu(blockId, anchor) {
@@ -1530,6 +1804,7 @@ function applyBlockTransform(type) {
   applyBlockType(block, type, true);
   closeSlashMenu();
   if (type === "table") focusTableCell(block.id, 1, 0, "start");
+  if (type === "ai") focusBlock(block.id, "end");
 }
 
 function openPalette() {
@@ -1546,6 +1821,7 @@ function closePalette() {
 
 function plainTextFromBlock(block) {
   if (block.type === "table") return block.rows.flat().map(stripHTML).join(" ");
+  if (block.type === "ai") return [...(block.messages || []).map(message => message.content), block.draft || ""].join(" ");
   return stripHTML(block.text || "");
 }
 
@@ -1714,7 +1990,7 @@ function wireGlobal() {
     }
     if (selectedBlockId && (event.key === "Backspace" || event.key === "Delete")) {
       const active = document.activeElement;
-      if (!active?.closest?.(".b-content, .table-cell, .image-caption, #pageTitle, #paletteMask")) {
+      if (!active?.closest?.(".b-content, .table-cell, .image-caption, .ai-input, #pageTitle, #paletteMask")) {
         event.preventDefault();
         removeBlock(selectedBlockId);
         return;
