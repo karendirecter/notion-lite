@@ -324,7 +324,7 @@ function renderSidebar() {
           <svg viewBox="0 0 20 20" width="12" height="12"><path fill="currentColor" d="M7 4.5 12.5 10 7 15.5"/></svg>
         </button>
         <span class="pr-icon">${page.icon || DEFAULT_PAGE_ICON}</span>
-        <span class="pr-title">${escapeHTML(page.title || EMPTY_TITLE)}</span>
+        <span class="pr-title">${page.title || EMPTY_TITLE}</span>
         <span class="pr-actions">
           <button class="icon-btn small" data-act="child" title="添加子页面">＋</button>
           <button class="icon-btn small" data-act="del" title="删除页面">✕</button>
@@ -410,7 +410,7 @@ function deletePage(id) {
 function renderCrumbs() {
   const items = getAncestors(currentPage().id);
   $("#crumbs").innerHTML = items.map((page, index) => {
-    const item = `<button class="cr" data-id="${page.id}">${page.icon || DEFAULT_PAGE_ICON} ${escapeHTML(page.title || EMPTY_TITLE)}</button>`;
+    const item = `<button class="cr" data-id="${page.id}">${page.icon || DEFAULT_PAGE_ICON} ${page.title || EMPTY_TITLE}</button>`;
     return index === items.length - 1 ? item : `${item}<span class="sep">/</span>`;
   }).join("");
   $$(".crumbs .cr").forEach(button => button.addEventListener("click", () => switchPage(button.dataset.id)));
