@@ -61,6 +61,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/debug/config") {
+      sendJson(res, 200, {
+        env: ENV,
+        ai: getAIConfig()
+      });
+      return;
+    }
+
     if (req.method !== "GET" && req.method !== "HEAD") {
       sendJson(res, 405, { error: "Method not allowed" });
       return;
@@ -259,10 +267,6 @@ function readJsonBody(req) {
     let raw = "";
     req.on("data", chunk => {
       raw += chunk;
-      if (raw.length > 2_000_000) {
-        reject(new Error("Request body too large"));
-        req.destroy();
-      }
     });
     req.on("end", () => {
       try {
